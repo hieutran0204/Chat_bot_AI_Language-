@@ -3,6 +3,7 @@
 #              Model is lazy-loaded on first call and cached in memory for the process lifetime.
 
 import logging
+import threading
 
 from app.core.interfaces.embedder import IEmbedder
 
@@ -15,6 +16,10 @@ class HuggingFaceEmbedder(IEmbedder):
 
     The model is downloaded once and loaded locally — no API key required
     for local inference. Suitable as the primary embedding provider.
+
+    Thread-safety: A threading.Lock guards the lazy-load path so concurrent
+    requests do not trigger duplicate SentenceTransformer loads (double-checked
+    locking pattern).
 
     Args:
         model_name: HuggingFace model ID.
@@ -29,16 +34,27 @@ class HuggingFaceEmbedder(IEmbedder):
         self.model_name = model_name
         self._model = None
         self._dimension: int | None = None
+        # Guards the lazy-load block; prevents duplicate loads when multiple
+        # threads call embed() simultaneously before the model is cached.
+        self._lock = threading.Lock()
 
     def _load_model(self):
-        """Lazy-load the SentenceTransformer model on first use."""
-        if self._model is None:
-            from sentence_transformers import SentenceTransformer
+        """
+        Lazy-load the SentenceTransformer model on first use.
 
-            logger.info("Loading HuggingFace embedding model: %s", self.model_name)
-            self._model = SentenceTransformer(self.model_name)
-            self._dimension = self._model.get_sentence_embedding_dimension()
-            logger.info("Embedding model ready (dim=%d)", self._dimension)
+        Uses double-checked locking: the outer check avoids lock contention
+        after the model is loaded, while the inner check prevents a second
+        thread from loading again if it was waiting on the lock.
+        """
+        if self._model is None:
+            with self._lock:
+                if self._model is None:
+                    from sentence_transformers import SentenceTransformer
+
+                    logger.info("Loading HuggingFace embedding model: %s", self.model_name)
+                    self._model = SentenceTransformer(self.model_name)
+                    self._dimension = self._model.get_sentence_embedding_dimension()
+                    logger.info("Embedding model ready (dim=%d)", self._dimension)
         return self._model
 
     @property

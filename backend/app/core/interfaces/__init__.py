@@ -5,6 +5,7 @@
 from app.core.interfaces.chunker import IChunker
 from app.core.interfaces.embedder import IEmbedder
 from app.core.interfaces.llm_provider import ILLMProvider
+from app.core.interfaces.memory import ILearnerProfileStore, IMemoryStore
 from app.core.interfaces.pipeline import IRagPipeline
 from app.core.interfaces.vector_store import IVectorStore
 
@@ -14,4 +15,6 @@ __all__ = [
     "IVectorStore",
     "IChunker",
     "IRagPipeline",
+    "IMemoryStore",
+    "ILearnerProfileStore",
 ]

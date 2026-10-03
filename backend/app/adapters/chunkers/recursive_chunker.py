@@ -10,6 +10,10 @@ from app.core.interfaces.chunker import IChunker, TextChunk
 logger = logging.getLogger(__name__)
 
 
+class ChunkerError(Exception):
+    """Raised when a document cannot be parsed or chunked."""
+
+
 class RecursiveChunker(IChunker):
     """
     Document parser and text splitter using RecursiveCharacterTextSplitter.
@@ -46,40 +50,92 @@ class RecursiveChunker(IChunker):
         """
         Extract text from a PDF file, page by page.
 
+        Logs a warning when no text is extracted from any page, which typically
+        indicates a scanned/image-only PDF that requires OCR pre-processing.
+
         Args:
             file_path: Absolute path to the PDF file.
 
         Returns:
             List of (text, metadata) tuples, one per non-empty page.
+
+        Raises:
+            ChunkerError: If the PDF cannot be opened or read.
         """
         import fitz  # PyMuPDF
 
-        pages: list[tuple[str, dict]] = []
-        with fitz.open(str(file_path)) as doc:
-            for page_num, page in enumerate(doc, start=1):
-                text = page.get_text("text").strip()
-                if text:
-                    pages.append((text, {"page": page_num, "filename": file_path.name}))
+        try:
+            pages: list[tuple[str, dict]] = []
+            with fitz.open(str(file_path)) as doc:
+                for page_num, page in enumerate(doc, start=1):
+                    text = page.get_text("text").strip()
+                    if text:
+                        pages.append((text, {"page": page_num, "filename": file_path.name}))
 
-        logger.info("Parsed %d pages from PDF: %s", len(pages), file_path.name)
-        return pages
+            if not pages:
+                logger.warning(
+                    "No text extracted from PDF '%s' — the file may be a scanned image "
+                    "without a text layer (OCR required) or may be encrypted.",
+                    file_path.name,
+                )
+            else:
+                logger.info("Parsed %d pages from PDF: %s", len(pages), file_path.name)
+
+            return pages
+        except Exception as exc:
+            raise ChunkerError(f"Failed to parse PDF '{file_path.name}': {exc}") from exc
 
     def _parse_docx(self, file_path: Path) -> list[tuple[str, dict]]:
         """
         Extract text from a DOCX file, grouped as a single block.
+
+        Includes content from both paragraphs and tables. python-docx's
+        doc.paragraphs does not cover text inside tables, so table cells are
+        iterated separately and appended as pipe-delimited rows.
 
         Args:
             file_path: Absolute path to the DOCX file.
 
         Returns:
             Single-element list with full document text and metadata.
-        """
-        from docx import Document
 
-        doc = Document(str(file_path))
-        full_text = "\n\n".join(p.text for p in doc.paragraphs if p.text.strip())
-        logger.info("Parsed DOCX: %s", file_path.name)
-        return [(full_text, {"filename": file_path.name})]
+        Raises:
+            ChunkerError: If the DOCX cannot be opened or read.
+        """
+        try:
+            from docx import Document
+
+            doc = Document(str(file_path))
+
+            # --- Paragraph text ---
+            paragraph_text = "\n\n".join(p.text for p in doc.paragraphs if p.text.strip())
+
+            # --- Table text (omitted by doc.paragraphs) ---
+            # Each row is serialised as "cell1 | cell2 | ..." so that structured
+            # data (contracts, reports) survives chunking in a readable form.
+            table_rows: list[str] = []
+            for table in doc.tables:
+                for row in table.rows:
+                    row_text = " | ".join(
+                        cell.text.strip() for cell in row.cells if cell.text.strip()
+                    )
+                    if row_text:
+                        table_rows.append(row_text)
+
+            parts = [paragraph_text] if paragraph_text else []
+            if table_rows:
+                parts.append("\n".join(table_rows))
+
+            full_text = "\n\n".join(parts)
+            logger.info(
+                "Parsed DOCX: %s (%d table rows extracted)",
+                file_path.name,
+                len(table_rows),
+            )
+            return [(full_text, {"filename": file_path.name})]
+
+        except Exception as exc:
+            raise ChunkerError(f"Failed to parse DOCX '{file_path.name}': {exc}") from exc
 
     def _parse_txt(self, file_path: Path) -> list[tuple[str, dict]]:
         """
@@ -90,10 +146,16 @@ class RecursiveChunker(IChunker):
 
         Returns:
             Single-element list with file content and metadata.
+
+        Raises:
+            ChunkerError: If the file cannot be read.
         """
-        text = file_path.read_text(encoding="utf-8", errors="replace")
-        logger.info("Parsed TXT: %s", file_path.name)
-        return [(text, {"filename": file_path.name})]
+        try:
+            text = file_path.read_text(encoding="utf-8", errors="replace")
+            logger.info("Parsed TXT: %s", file_path.name)
+            return [(text, {"filename": file_path.name})]
+        except Exception as exc:
+            raise ChunkerError(f"Failed to read TXT '{file_path.name}': {exc}") from exc
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -111,8 +173,9 @@ class RecursiveChunker(IChunker):
             Ordered list of TextChunk objects ready for embedding.
 
         Raises:
-            ValueError: If the file extension is not supported.
             FileNotFoundError: If the file does not exist at the given path.
+            ValueError: If the file extension is not supported.
+            ChunkerError: If the file cannot be parsed (corrupted, encrypted, etc.).
         """
         path = Path(file_path)
         if not path.exists():

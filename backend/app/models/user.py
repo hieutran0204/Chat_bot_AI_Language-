@@ -53,6 +53,12 @@ class User(Base):
     progress: Mapped[list["UserProgress"]] = relationship(  # noqa: F821
         "UserProgress", back_populates="user", cascade="all, delete-orphan"
     )
+    weakness_logs: Mapped[list["UserWeaknessLog"]] = relationship(  # noqa: F821
+        "UserWeaknessLog", back_populates="user", cascade="all, delete-orphan"
+    )
+    strength_logs: Mapped[list["UserStrengthLog"]] = relationship(  # noqa: F821
+        "UserStrengthLog", back_populates="user", cascade="all, delete-orphan"
+    )
 
     def __repr__(self) -> str:
         return f"<User id={self.id} email={self.email} level={self.level}>"

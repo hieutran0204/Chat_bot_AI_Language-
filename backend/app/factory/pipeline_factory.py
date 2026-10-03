@@ -147,6 +147,7 @@ def create_pipeline(db: AsyncSession, pipeline_type: str = "naive") -> IRagPipel
             llm=llm,
             vector_store=vector_store,
             embedder=embedder,
+            db=db,
             top_k=settings.retrieval_top_k,
             similarity_threshold=settings.similarity_threshold,
             history_limit=settings.conversation_history_limit,

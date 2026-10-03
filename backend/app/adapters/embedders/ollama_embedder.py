@@ -26,19 +26,26 @@ class OllamaEmbedder(IEmbedder):
     Args:
         base_url: Ollama server base URL (default: http://localhost:11434).
         model: Embedding model name (default: 'nomic-embed-text').
+        timeout: Request timeout in seconds (default: 30.0).
     """
 
     def __init__(
         self,
         base_url: str = "http://localhost:11434",
         model: str = "nomic-embed-text",
+        timeout: float = 30.0,
     ) -> None:
         self.base_url = base_url
         self.model = model
+        self.timeout = timeout
 
     def embed(self, text: str) -> list[float]:
         """
         Embed a single text string via Ollama.
+
+        Uses an explicit ollama.Client pointed at self.base_url so that
+        custom host configurations (remote server, non-default port) are
+        honoured instead of falling back to the library's default localhost client.
 
         Args:
             text: Input text to embed.
@@ -52,8 +59,12 @@ class OllamaEmbedder(IEmbedder):
         import ollama
 
         try:
-            logger.debug("Ollama embed: model=%s text_len=%d", self.model, len(text))
-            response = ollama.embeddings(model=self.model, prompt=text)
+            logger.debug("Ollama embed: model=%s base_url=%s text_len=%d", self.model, self.base_url, len(text))
+            # Use an explicit Client so self.base_url is always respected.
+            # The module-level ollama.embeddings() uses a default Client that reads
+            # OLLAMA_HOST from the environment and would silently ignore self.base_url.
+            client = ollama.Client(host=self.base_url, timeout=self.timeout)
+            response = client.embeddings(model=self.model, prompt=text)
             return response["embedding"]
         except Exception as exc:
             raise EmbedderError(f"Ollama embedding failed: {exc}") from exc

@@ -6,13 +6,12 @@ import logging
 import uuid
 from pathlib import Path
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.models.document import Document, DocumentChunk
-from app.rag.chunker import DocumentChunker
-from app.rag.embedder import get_embedder
+from app.models.document import Document
+from app.services.ingest_service import IngestService
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +29,7 @@ class DocumentService:
 
     def __init__(self, db: AsyncSession) -> None:
         self._db = db
-        self._chunker = DocumentChunker()
-        self._embedder = get_embedder()
+        self._ingest_service = IngestService(db)
 
     # ── File I/O ──────────────────────────────────────────────────────────────
 
@@ -106,59 +104,13 @@ class DocumentService:
         """
         Parse, chunk, embed, and store a document's content.
 
-        This is the heavy async step — called after returning 202 to the client.
-        Updates document status to 'ready' (or 'failed') when complete.
+        Delegates to IngestService (which uses RecursiveChunker and create_embedder).
+        Called as an asynchronous background task after returning 202.
 
         Args:
             document: Document ORM instance with status='processing'.
         """
-        try:
-            # 1. Parse and chunk the document
-            chunks = self._chunker.chunk_file(document.file_path)
-            logger.info(
-                "Chunked document %s → %d chunks", document.id, len(chunks)
-            )
-
-            if not chunks:
-                raise ValueError("Document produced no text chunks (possibly empty or unsupported format).")
-
-            # 2. Batch embed all chunks
-            texts = [c.content for c in chunks]
-            vectors = self._embedder.embed_batch(texts)
-
-            # 3. Insert chunks into document_chunks table
-            db_chunks = [
-                DocumentChunk(
-                    document_id=document.id,
-                    content=chunk.content,
-                    embedding=vector,
-                    chunk_index=chunk.chunk_index,
-                    metadata=chunk.metadata,
-                )
-                for chunk, vector in zip(chunks, vectors, strict=True)
-            ]
-            self._db.add_all(db_chunks)
-
-            # 4. Update document status to 'ready'
-            await self._db.execute(
-                update(Document)
-                .where(Document.id == document.id)
-                .values(status="ready", chunk_count=len(chunks))
-            )
-            await self._db.commit()
-
-            logger.info(
-                "Ingestion complete: document %s, %d chunks stored",
-                document.id,
-                len(chunks),
-            )
-
-        except Exception as exc:
-            logger.exception("Ingestion failed for document %s: %s", document.id, exc)
-            await self._db.execute(
-                update(Document).where(Document.id == document.id).values(status="failed")
-            )
-            await self._db.commit()
+        await self._ingest_service.ingest_document(document)
 
     async def list_documents(self, user_id: uuid.UUID) -> list[Document]:
         """

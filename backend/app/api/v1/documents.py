@@ -6,28 +6,16 @@ import logging
 import uuid
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, status
-from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.core.database import get_db
 from app.models.user import User
+from app.schemas.document import DocumentResponse
 from app.services.document_service import DocumentService
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
 logger = logging.getLogger(__name__)
-
-
-class DocumentResponse(BaseModel):
-    """Document metadata returned to the client."""
-
-    id: uuid.UUID
-    filename: str
-    file_type: str
-    status: str
-    chunk_count: int
-
-    model_config = {"from_attributes": True}
 
 
 @router.post("/upload", status_code=status.HTTP_202_ACCEPTED, response_model=DocumentResponse)

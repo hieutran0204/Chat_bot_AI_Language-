@@ -7,16 +7,16 @@ import logging
 import uuid
 from collections.abc import AsyncGenerator
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
-from app.core.database import get_db
+from app.core.database import AsyncSessionFactory, get_db
+from app.core.exceptions import LLMException
 from app.models.conversation import ConversationMode
 from app.models.user import User
-from app.rag.pipeline import RAGPipeline
-from app.rag.retriever import RetrievedChunk
 from app.schemas.chat import (
     ChatRequest,
     ChatResponse,
@@ -26,9 +26,13 @@ from app.schemas.chat import (
     SourceChunk,
 )
 from app.services.chat_service import ChatService
+from app.services.extraction_service import ExtractionService
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
 logger = logging.getLogger(__name__)
+
+# Module-level singleton — stateless, safe to reuse across requests
+_extraction_service = ExtractionService()
 
 
 @router.post("/conversations", response_model=ConversationResponse, status_code=status.HTTP_201_CREATED)
@@ -80,15 +84,15 @@ async def list_conversations(
 @router.get("/conversations/{conversation_id}/messages", response_model=list[MessageResponse])
 async def get_conversation_messages(
     conversation_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
+    after_id: uuid.UUID | None = None,
     current_user: User = Depends(get_current_user),
 ):
     """
-    Get all messages in a conversation (chat history).
+    Get messages in a conversation with optional cursor synchronization (after_id).
 
     Args:
         conversation_id: UUID of the conversation.
-        db: Injected async database session.
+        after_id: Optional UUID anchor for client incremental synchronization.
         current_user: Authenticated user from JWT.
 
     Returns:
@@ -97,106 +101,83 @@ async def get_conversation_messages(
     Raises:
         HTTPException 404: If conversation not found.
     """
-    service = ChatService(db)
+    service = ChatService()
     conv = await service.get_conversation(conversation_id, current_user.id)
     if not conv:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found.")
-    messages = await service.get_messages(conversation_id, limit=100)
+    messages = await service.get_messages(conversation_id, limit=100, after_id=after_id)
     return messages
+
+
+async def _validate_document_access(document_ids: list[uuid.UUID] | None, user_id: uuid.UUID) -> None:
+    """
+    Validate that all specified document_ids exist, belong to user, and are in 'ready' status.
+
+    Raises:
+        HTTPException 404: If any document_id is not found, not owned by user, or not ready.
+    """
+    if not document_ids:
+        return
+    unique_ids = list(set(document_ids))
+    async with AsyncSessionFactory() as session:
+        stmt = text(
+            "SELECT id FROM documents "
+            "WHERE id = ANY(:ids) AND user_id = :uid AND status = 'ready'"
+        )
+        result = await session.execute(stmt, {"ids": unique_ids, "uid": user_id})
+        ready_ids = [row[0] for row in result.fetchall()]
+        if len(ready_ids) != len(unique_ids):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="One or more documents not found or not accessible.",
+            )
 
 
 @router.post("/stream")
 async def stream_chat(
     body: ChatRequest,
-    db: AsyncSession = Depends(get_db),
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
 ):
     """
-    Send a message and receive a streaming SSE response.
+    Send a message and receive a streaming SSE response with decoupled DB sessions.
 
     Uses Server-Sent Events (text/event-stream) for real-time token delivery.
-
-    SSE Event types:
-    - 'sources': JSON list of retrieved chunks (sent once at start, doc_qa/grammar only).
-    - 'token': Individual text token from the LLM.
-    - 'done': Signals the end of the stream with the full message_id.
-    - 'error': Sent if the pipeline fails mid-stream.
-
-    Args:
-        body: ChatRequest with conversation_id, message, and optional document_ids.
-        db: Injected async database session.
-        current_user: Authenticated user from JWT.
-
-    Returns:
-        StreamingResponse with text/event-stream content type.
-
-    Raises:
-        HTTPException 404: If the conversation is not found.
+    Does NOT hold database connections during token generation.
     """
-    chat_service = ChatService(db)
-    conv = await chat_service.get_conversation(body.conversation_id, current_user.id)
-    if not conv:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found.")
-
-    # Persist user message
-    await chat_service.save_user_message(
-        conversation_id=body.conversation_id,
-        content=body.message,
-        audio_url=body.audio_url,
-        audio_duration_ms=body.audio_duration_ms,
-        stt_confidence=body.stt_confidence,
-    )
-    history = await chat_service.get_history(body.conversation_id)
+    await _validate_document_access(body.document_ids, current_user.id)
+    chat_service = ChatService()
+    captured: dict = {}
 
     async def event_generator() -> AsyncGenerator[str, None]:
-        """
-        Inner generator that runs the RAG pipeline and yields SSE events.
+        async for event_type, payload in chat_service.stream_message(
+            conversation_id=body.conversation_id,
+            user_id=current_user.id,
+            user_level=current_user.level,
+            content=body.message,
+            client_message_id=body.client_message_id,
+            audio_url=body.audio_url,
+            audio_duration_ms=body.audio_duration_ms,
+            stt_confidence=body.stt_confidence,
+            document_ids=body.document_ids,
+            captured=captured,
+        ):
+            yield f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
 
-        Flow:
-        1. Start RAG pipeline stream.
-        2. On first yield with chunks → send 'sources' event.
-        3. Yield each token as a 'token' event.
-        4. After stream completes → persist assistant message, send 'done'.
-        5. On error → send 'error' event.
-        """
-        pipeline = RAGPipeline(db)
-        full_response: list[str] = []
-        final_chunks: list[RetrievedChunk] = []
-
-        try:
-            async for token, chunks in pipeline.run_stream(
-                user_message=body.message,
-                mode=conv.mode,
+        # Generator exhausted normally — schedule extraction only if completed
+        if captured.get("user_message") and captured.get("assistant_text"):
+            background_tasks.add_task(
+                _extraction_service.extract_and_log,
                 user_id=current_user.id,
-                user_level=current_user.level,
-                conversation_history=history,
-                document_ids=body.document_ids,
-            ):
-                # First chunk batch — send sources event
-                if chunks:
-                    final_chunks = chunks
-                    sources_payload = [c.to_dict() for c in chunks]
-                    yield f"event: sources\ndata: {json.dumps(sources_payload)}\n\n"
-
-                # Yield each token
-                full_response.append(token)
-                yield f"event: token\ndata: {json.dumps({'token': token})}\n\n"
-
-            # Persist assistant response
-            assistant_msg = await chat_service.save_assistant_message(
                 conversation_id=body.conversation_id,
-                content="".join(full_response),
-                sources=final_chunks,
-                user_id=current_user.id,
+                user_message=captured["user_message"],
+                assistant_text=captured["assistant_text"],
+                assistant_message_id=captured.get("assistant_message_id"),
             )
-            await chat_service.update_progress(current_user.id, conv.mode)
-            await db.commit()
-
-            yield f"event: done\ndata: {json.dumps({'message_id': str(assistant_msg.id)})}\n\n"
-
-        except Exception as exc:
-            logger.exception("Stream error for user=%s: %s", current_user.id, exc)
-            yield f"event: error\ndata: {json.dumps({'detail': str(exc)})}\n\n"
+            logger.debug(
+                "Scheduled extraction background task for user=%s session=%s msg=%s",
+                current_user.id, body.conversation_id, captured.get("assistant_message_id"),
+            )
 
     return StreamingResponse(
         event_generator(),
@@ -211,63 +192,51 @@ async def stream_chat(
 @router.post("/message", response_model=ChatResponse)
 async def send_message(
     body: ChatRequest,
-    db: AsyncSession = Depends(get_db),
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
 ):
     """
     Send a message and receive the full response (non-streaming).
-
-    Useful for testing, simple clients, or Flutter fallback.
-
-    Args:
-        body: ChatRequest with conversation_id, message, and optional document_ids.
-        db: Injected async database session.
-        current_user: Authenticated user from JWT.
-
-    Returns:
-        ChatResponse with full response text and sources.
-
-    Raises:
-        HTTPException 404: If the conversation is not found.
     """
-    chat_service = ChatService(db)
+    await _validate_document_access(body.document_ids, current_user.id)
+    chat_service = ChatService()
+    try:
+        assistant_msg, chunks = await chat_service.send_message(
+            conversation_id=body.conversation_id,
+            user_id=current_user.id,
+            user_level=current_user.level,
+            content=body.message,
+            client_message_id=body.client_message_id,
+            audio_url=body.audio_url,
+            audio_duration_ms=body.audio_duration_ms,
+            stt_confidence=body.stt_confidence,
+            document_ids=body.document_ids,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    except LLMException as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=exc.to_client_payload())
+
+    # Schedule background extraction
+    if body.message and assistant_msg.content:
+        background_tasks.add_task(
+            _extraction_service.extract_and_log,
+            user_id=current_user.id,
+            conversation_id=body.conversation_id,
+            user_message=body.message,
+            assistant_text=assistant_msg.content,
+            assistant_message_id=assistant_msg.id,
+        )
+
     conv = await chat_service.get_conversation(body.conversation_id, current_user.id)
-    if not conv:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found.")
-
-    await chat_service.save_user_message(
-        conversation_id=body.conversation_id,
-        content=body.message,
-        audio_url=body.audio_url,
-        audio_duration_ms=body.audio_duration_ms,
-        stt_confidence=body.stt_confidence,
-    )
-    history = await chat_service.get_history(body.conversation_id)
-
-    pipeline = RAGPipeline(db)
-    response_text, chunks = await pipeline.run(
-        user_message=body.message,
-        mode=conv.mode,
-        user_id=current_user.id,
-        user_level=current_user.level,
-        conversation_history=history,
-        document_ids=body.document_ids,
-    )
-
-    assistant_msg = await chat_service.save_assistant_message(
-        conversation_id=body.conversation_id,
-        content=response_text,
-        sources=chunks,
-        user_id=current_user.id,
-    )
-    await chat_service.update_progress(current_user.id, conv.mode)
-    await db.commit()
+    mode = conv.mode if conv else ConversationMode.CONVERSATION
 
     return ChatResponse(
         conversation_id=body.conversation_id,
         message_id=assistant_msg.id,
-        response=response_text,
-        mode=conv.mode,
+        response=assistant_msg.content,
+        mode=mode,
+        status=assistant_msg.status,
         audio_url=assistant_msg.audio_url,
         corrections=assistant_msg.corrections,
         sources=[SourceChunk(**c.to_dict()) for c in chunks],

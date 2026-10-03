@@ -85,6 +85,11 @@ class PgVectorStore(IVectorStore):
         sql += " ORDER BY similarity DESC LIMIT :top_k"
         params["top_k"] = top_k
 
+        try:
+            await self._db.execute(text("SET LOCAL ivfflat.probes = 10"))
+        except Exception as exc:
+            logger.debug("PgVectorStore: could not SET LOCAL ivfflat.probes: %s", exc)
+
         result = await self._db.execute(text(sql), params)
         rows = result.fetchall()
 
@@ -107,6 +112,83 @@ class PgVectorStore(IVectorStore):
             top_k,
         )
         return chunks
+
+    async def get_sampled_chunks_for_summary(
+        self,
+        user_id: uuid.UUID,
+        document_ids: list[uuid.UUID] | None = None,
+        top_k_per_doc: int = 3,
+    ) -> list[RetrievedChunk]:
+        """
+        Sample evenly distributed chunks (e.g. 0%, 50%, 100%) across target documents.
+
+        Args:
+            user_id: Requesting user ID for isolation.
+            document_ids: Optional document IDs to sample from.
+            top_k_per_doc: Maximum chunks to sample per document.
+
+        Returns:
+            List of RetrievedChunk ordered by document and chunk_index.
+        """
+        target_doc_ids: list[uuid.UUID] = []
+
+        if document_ids:
+            target_doc_ids = list(document_ids)
+        else:
+            doc_query = text(
+                "SELECT id FROM documents "
+                "WHERE user_id = :user_id AND status = 'ready' "
+                "ORDER BY created_at DESC LIMIT 3"
+            )
+            doc_result = await self._db.execute(doc_query, {"user_id": str(user_id)})
+            target_doc_ids = [row.id for row in doc_result.fetchall()]
+
+        if not target_doc_ids:
+            return []
+
+        sampled_chunks: list[RetrievedChunk] = []
+        for did in target_doc_ids:
+            chunk_query = text(
+                "SELECT id, document_id, content, metadata, chunk_index "
+                "FROM document_chunks "
+                "WHERE document_id = :doc_id "
+                "ORDER BY chunk_index ASC"
+            )
+            chunk_result = await self._db.execute(chunk_query, {"doc_id": str(did)})
+            doc_chunks = chunk_result.fetchall()
+
+            if not doc_chunks:
+                continue
+
+            n = len(doc_chunks)
+            if n <= top_k_per_doc:
+                selected_indices = list(range(n))
+            elif top_k_per_doc == 3:
+                selected_indices = [0, n // 2, n - 1]
+            else:
+                # Generalized even sampling
+                step = (n - 1) / (top_k_per_doc - 1) if top_k_per_doc > 1 else 0
+                selected_indices = sorted(list({int(round(i * step)) for i in range(top_k_per_doc)}))
+
+            for idx in selected_indices:
+                row = doc_chunks[idx]
+                sampled_chunks.append(
+                    RetrievedChunk(
+                        chunk_id=row.id,
+                        document_id=row.document_id,
+                        content=row.content,
+                        similarity=1.0,
+                        metadata=row.metadata or {},
+                    )
+                )
+
+        logger.info(
+            "PgVectorStore: sampled %d chunks for summary (docs=%d, user=%s)",
+            len(sampled_chunks),
+            len(target_doc_ids),
+            user_id,
+        )
+        return sampled_chunks
 
     async def upsert_chunks(
         self,

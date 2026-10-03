@@ -1,7 +1,6 @@
 # name: test_messages.py
 # description: Unit tests for core message abstractions, serialization, and conversions.
 
-import pytest
 from app.core.primitives.messages import (
     AIMessage,
     BaseMessage,
@@ -9,7 +8,6 @@ from app.core.primitives.messages import (
     HumanMessage,
     MessageRole,
     SystemMessage,
-    ToolMessage,
     messages_to_ollama,
 )
 
@@ -32,7 +30,7 @@ def test_ai_message_with_corrections():
     correction = Correction(
         original="I go to school yesterday.",
         suggestion="I went to school yesterday.",
-        type="grammar",
+        type="tense_past_simple",
         explanation="Use past tense 'went' when referring to 'yesterday'.",
     )
     ai_msg = AIMessage(
@@ -42,7 +40,7 @@ def test_ai_message_with_corrections():
     assert ai_msg.role == MessageRole.AI
     assert len(ai_msg.corrections) == 1
     assert ai_msg.corrections[0].original == "I go to school yesterday."
-    assert ai_msg.corrections[0].type == "grammar"
+    assert ai_msg.corrections[0].type == "tense_past_simple"
 
 
 def test_serialization_and_deserialization():

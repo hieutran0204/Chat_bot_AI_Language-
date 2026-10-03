@@ -2,6 +2,8 @@
 
 Hệ thống Backend phục vụ ứng dụng **Học tiếng Anh thông minh (AI Agent Platform)** tích hợp kỹ thuật RAG (Retrieval-Augmented Generation), mô hình Agent tự chủ (Reasoning & Tool Execution), Ký ức dài hạn (Long-Term Memory & SRS), và kiến trúc chuẩn **Hexagonal Architecture (Ports & Adapters)**.
 
+> 📖 **Tài liệu Chi tiết Toàn diện:** Xem tại [docs/system_overview.md](file:///e:/Language_AI/Language_AI_Backend/docs/system_overview.md) (bao gồm kiến trúc 2 luồng đồng bộ/bất đồng bộ, 12 taxonomy cá nhân hóa, profiler đo độ trễ và cơ sở dữ liệu).
+
 ---
 
 ## 📌 1. Mô tả Dự án (Project Overview)
@@ -88,7 +90,7 @@ alembic upgrade head
 
 ### Bước 6: Khởi chạy Server Backend
 ```powershell
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+ 
 ```
 👉 Truy cập API Documentation (Swagger UI): **[http://localhost:8000/docs](http://localhost:8000/docs)**
 

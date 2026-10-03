@@ -9,6 +9,7 @@ import uuid
 from typing import Any
 from pydantic import BaseModel, Field
 
+from app.core.interfaces.memory import ILearnerProfileStore
 from app.core.redis.client import RedisClient, get_redis_client
 
 logger = logging.getLogger(__name__)
@@ -36,7 +37,7 @@ class LearnerProfile(BaseModel):
         return sorted_items[:top_n]
 
 
-class RedisLearnerProfileManager:
+class RedisLearnerProfileManager(ILearnerProfileStore):
     """
     Manages long-term learner memory cached in Redis.
 
@@ -88,6 +89,7 @@ class RedisLearnerProfileManager:
             level, raw_weaknesses, last_session = await pipe.execute()
 
             weaknesses = {k: int(v) for k, v in (raw_weaknesses or {}).items()}
+            self.redis._circuit_breaker.record_success()
             return LearnerProfile(
                 user_id=uid,
                 level=level or fallback_level,
@@ -95,6 +97,7 @@ class RedisLearnerProfileManager:
                 last_session=last_session,
             )
         except Exception as exc:
+            self.redis._circuit_breaker.record_failure(exc)
             logger.warning("Failed to get learner profile from Redis for %s: %s", uid, exc)
             return LearnerProfile(user_id=uid, level=fallback_level)
 
@@ -112,8 +115,9 @@ class RedisLearnerProfileManager:
         self,
         user_id: uuid.UUID | str,
         weakness_key: str,
-        delta: int = 1,
+        increment: int = 1,
         max_items: int = 15,
+        **kwargs: Any,
     ) -> None:
         """
         Increment the frequency of a detected learner weakness.
@@ -122,16 +126,18 @@ class RedisLearnerProfileManager:
         unbounded context growth.
 
         Args:
-            user_id: Learner UUID.
+            user_id: Learner UUID or string identifier.
             weakness_key: Identifier of error (e.g. "past_tense", "third_person_s").
-            delta: Count increment.
+            increment: Count increment (supports legacy delta parameter via kwargs).
             max_items: Maximum distinct weaknesses tracked in the hot cache.
+            **kwargs: Extra parameters for backward compatibility.
         """
         if not self.redis.is_available or self.redis.client is None:
             return
+        step = kwargs.get("delta", increment)
         _, weak_key, _ = self._keys(user_id)
         try:
-            new_val = await self.redis.client.hincrby(weak_key, weakness_key, delta)
+            await self.redis.client.hincrby(weak_key, weakness_key, step)
 
             # Check if pruning is necessary
             count = await self.redis.client.hlen(weak_key)
@@ -147,7 +153,12 @@ class RedisLearnerProfileManager:
             logger.warning("Failed to record weakness in Redis for %s: %s", user_id, exc)
 
     async def update_last_session(self, user_id: uuid.UUID | str) -> None:
-        """Update last active session timestamp."""
+        """
+        Update last active session timestamp.
+
+        Args:
+            user_id: Learner UUID or string identifier.
+        """
         if not self.redis.is_available or self.redis.client is None:
             return
         _, _, session_key = self._keys(user_id)
@@ -156,3 +167,22 @@ class RedisLearnerProfileManager:
             await self.redis.client.set(session_key, now_iso)
         except Exception as exc:
             logger.warning("Failed to update last session in Redis for %s: %s", user_id, exc)
+
+    async def invalidate_profile(self, user_id: uuid.UUID | str) -> None:
+        """
+        Evict the cached profile for a learner from Redis.
+
+        Args:
+            user_id: Learner UUID or string identifier.
+
+        Returns:
+            None
+        """
+        if not self.redis.is_available or self.redis.client is None:
+            return
+        keys = self._keys(user_id)
+        try:
+            await self.redis.client.delete(*keys)
+            logger.info("Evicted cached learner profile for user %s", user_id)
+        except Exception as exc:
+            logger.warning("Failed to invalidate profile in Redis for %s: %s", user_id, exc)

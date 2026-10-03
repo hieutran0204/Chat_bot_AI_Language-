@@ -3,7 +3,6 @@
 
 import pytest
 from app.core.primitives.tools import (
-    BaseTool,
     DictionaryLookupTool,
     GrammarCheckerTool,
 )

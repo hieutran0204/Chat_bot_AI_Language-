@@ -3,7 +3,7 @@
 
 import pytest
 import unittest.mock as mock
-from app.core.primitives.messages import HumanMessage, AIMessage, MessageRole
+from app.core.primitives.messages import HumanMessage
 from app.core.redis.memory import RedisChatMessageHistory
 from app.core.redis.profile import LearnerProfile, RedisLearnerProfileManager
 from app.core.redis.cache import RedisCacheManager
@@ -43,6 +43,8 @@ async def test_learner_profile_manager_offline_fallback():
     assert profile.user_id == "user-456"
     assert profile.level == "A2"
     assert profile.weaknesses == {}
+    # Should not raise exception
+    await mgr.invalidate_profile("user-456")
 
 
 def test_cache_convenience_keys():

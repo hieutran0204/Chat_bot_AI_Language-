@@ -4,18 +4,18 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 import redis.asyncio as aioredis
 from redis.asyncio.client import Redis
 
 from app.core.config import settings
+from app.core.redis.circuit_breaker import get_redis_circuit_breaker
 
 logger = logging.getLogger(__name__)
 
 
 class RedisClient:
     """
-    Manages the async Redis connection pool.
+    Manages the async Redis connection pool with circuit breaker and timeouts.
 
     Provides high-performance non-blocking I/O for chat buffers,
     learner profile caching, and dictionary lookup memoization.
@@ -27,6 +27,7 @@ class RedisClient:
         self._pool: aioredis.ConnectionPool | None = None
         self._client: Redis | None = None
         self._is_connected: bool = False
+        self._circuit_breaker = get_redis_circuit_breaker()
 
     async def connect(self) -> None:
         """Initialize the connection pool and verify connectivity via PING."""
@@ -37,13 +38,18 @@ class RedisClient:
                 encoding="utf-8",
                 decode_responses=True,
                 max_connections=20,
+                socket_timeout=1.0,
+                socket_connect_timeout=1.0,
+                retry_on_timeout=False,
             )
             self._client = aioredis.Redis(connection_pool=self._pool)
             await self._client.ping()
             self._is_connected = True
+            self._circuit_breaker.record_success()
             logger.info("Redis connected successfully.")
         except Exception as exc:
             self._is_connected = False
+            self._circuit_breaker.record_failure(exc)
             logger.warning(
                 "Could not connect to Redis (%s). Running with memory fallback.", exc
             )
@@ -59,23 +65,36 @@ class RedisClient:
 
     @property
     def is_available(self) -> bool:
-        """Return True if Redis client is connected and available."""
-        return self._is_connected and self._client is not None
+        """
+        Return True if Redis client has a pool and the circuit breaker allows the request.
+        This is the single gatekeeper for attempting Redis operations.
+        """
+        if self._client is None:
+            return False
+        return self._circuit_breaker.allow_request()
 
     @property
     def client(self) -> Redis | None:
-        """Direct access to the underlying aioredis.Redis instance."""
-        return self._client if self._is_connected else None
+        """
+        Direct access to the underlying aioredis.Redis instance.
+        Does NOT re-query the circuit breaker to avoid consuming probe slots in HALF_OPEN.
+        """
+        return self._client
 
     async def ping(self) -> bool:
         """Perform a live health-check ping against Redis."""
         if not self._client:
             return False
         try:
-            return bool(await self._client.ping())
+            res = bool(await self._client.ping())
+            if res:
+                self._is_connected = True
+                self._circuit_breaker.record_success()
+            return res
         except Exception as exc:
             logger.warning("Redis ping failed: %s", exc)
             self._is_connected = False
+            self._circuit_breaker.record_failure(exc)
             return False
 
 

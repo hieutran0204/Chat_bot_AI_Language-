@@ -7,9 +7,8 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import get_db
+from app.core.database import AsyncSessionFactory
 from app.core.security import decode_token
 from app.models.user import User
 
@@ -18,17 +17,15 @@ bearer_scheme = HTTPBearer()
 
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
-    db: AsyncSession = Depends(get_db),
 ) -> User:
     """
     FastAPI dependency: extract and validate the Bearer JWT token.
 
-    Decodes the token, verifies it is an access token (not refresh),
-    and returns the corresponding User ORM instance.
+    Uses an isolated short session so DB connections are not held open
+    across long-running SSE streaming responses.
 
     Args:
         credentials: HTTP Bearer credentials from the Authorization header.
-        db: Injected async database session.
 
     Returns:
         Authenticated User ORM instance.
@@ -54,8 +51,9 @@ async def get_current_user(
     except (JWTError, ValueError):
         raise credentials_exception
 
-    result = await db.execute(select(User).where(User.id == user_id))
-    user = result.scalar_one_or_none()
+    async with AsyncSessionFactory() as session:
+        result = await session.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
 
     if user is None or not user.is_active:
         raise credentials_exception

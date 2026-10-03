@@ -1,12 +1,10 @@
 # name: test_prompts.py
 # description: Unit tests for ChatPromptTemplate and speaking personas.
 
-import pytest
 from app.core.primitives.messages import HumanMessage, AIMessage, MessageRole
 from app.core.primitives.prompts import (
     ChatPromptTemplate,
     SPEAKING_PARTNER_PROMPT,
-    GRAMMAR_ANALYZER_PROMPT,
 )
 
 

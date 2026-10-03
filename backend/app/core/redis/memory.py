@@ -8,14 +8,14 @@ import logging
 import uuid
 from typing import Sequence
 
-from app.core.config import settings
+from app.core.interfaces.memory import IMemoryStore
 from app.core.primitives.messages import BaseMessage
 from app.core.redis.client import RedisClient, get_redis_client
 
 logger = logging.getLogger(__name__)
 
 
-class RedisChatMessageHistory:
+class RedisChatMessageHistory(IMemoryStore):
     """
     Manages short-term conversation sliding window in Redis.
 
@@ -54,7 +54,9 @@ class RedisChatMessageHistory:
             pipe.rpush(self.key, payload)
             pipe.expire(self.key, self.ttl_seconds)
             await pipe.execute()
+            self.redis._circuit_breaker.record_success()
         except Exception as exc:
+            self.redis._circuit_breaker.record_failure(exc)
             logger.warning("Failed to append message to Redis for conv %s: %s", self.conversation_id, exc)
 
     async def add_messages(self, messages: Sequence[BaseMessage]) -> None:
@@ -73,7 +75,9 @@ class RedisChatMessageHistory:
             pipe.rpush(self.key, *payloads)
             pipe.expire(self.key, self.ttl_seconds)
             await pipe.execute()
+            self.redis._circuit_breaker.record_success()
         except Exception as exc:
+            self.redis._circuit_breaker.record_failure(exc)
             logger.warning("Failed to bulk append messages to Redis for conv %s: %s", self.conversation_id, exc)
 
     async def get_messages(self, limit: int = 20) -> list[BaseMessage]:
@@ -96,8 +100,10 @@ class RedisChatMessageHistory:
             for item in raw_items:
                 data = json.loads(item)
                 messages.append(BaseMessage.from_dict(data))
+            self.redis._circuit_breaker.record_success()
             return messages
         except Exception as exc:
+            self.redis._circuit_breaker.record_failure(exc)
             logger.warning("Failed to read messages from Redis for conv %s: %s", self.conversation_id, exc)
             return []
 
@@ -107,5 +113,7 @@ class RedisChatMessageHistory:
             return
         try:
             await self.redis.client.delete(self.key)
+            self.redis._circuit_breaker.record_success()
         except Exception as exc:
+            self.redis._circuit_breaker.record_failure(exc)
             logger.warning("Failed to clear Redis history for conv %s: %s", self.conversation_id, exc)

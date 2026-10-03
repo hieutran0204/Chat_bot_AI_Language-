@@ -8,7 +8,6 @@ import json
 import logging
 from typing import Any
 
-from app.core.config import settings
 from app.core.redis.client import RedisClient, get_redis_client
 
 logger = logging.getLogger(__name__)

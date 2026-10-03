@@ -3,6 +3,7 @@
 
 from app.models.conversation import Conversation, Message
 from app.models.document import Document, DocumentChunk
+from app.models.learner_analytics import SessionInsight, UserStrengthLog, UserWeaknessLog
 from app.models.progress import UserProgress
 from app.models.user import User
 
@@ -13,4 +14,7 @@ __all__ = [
     "Conversation",
     "Message",
     "UserProgress",
+    "UserWeaknessLog",
+    "UserStrengthLog",
+    "SessionInsight",
 ]

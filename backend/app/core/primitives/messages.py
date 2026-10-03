@@ -1,12 +1,56 @@
 # name: messages.py
 # description: LangChain-standard message abstractions with voice-first and learner correction fields.
+#              Correction taxonomy covers 12 granular error types targeting common Vietnamese learner patterns.
 
 from __future__ import annotations
 
-import json
 from enum import Enum
 from typing import Any, Literal
 from pydantic import BaseModel, Field
+
+# ── Weakness Taxonomy ─────────────────────────────────────────────────────────
+# 12 detailed categories that replace the previous 3 generic types.
+# Keep in sync with: LLM system prompt injection, user_weakness_log DB column.
+WEAKNESS_TAXONOMY: dict[str, list[str]] = {
+    "grammar": [
+        "tense_past_simple",       # Used wrong past-simple form or tense altogether
+        "tense_present_perfect",   # Confused present perfect vs past simple
+        "subject_verb_agreement",  # he go / she are
+        "article_usage",           # a/an/the errors
+        "preposition",             # at/in/on/by confusion
+        "word_order",              # Incorrect word order in sentence
+        "conditional",             # Type 1/2/3 conditional errors
+    ],
+    "vocab": [
+        "wrong_word",              # Used incorrect or unnatural word choice
+        "false_friend",            # Word resembling Vietnamese but wrong in English
+        "collocation",             # Wrong word pairing (make vs do homework)
+    ],
+    "pronunciation": [
+        "final_consonant",         # Dropping final consonant sounds
+        "th_sound",                # th → d or t substitution
+    ],
+}
+
+# Flat list of all valid weakness type strings for validation
+ALL_WEAKNESS_TYPES: list[str] = [
+    wt for types in WEAKNESS_TAXONOMY.values() for wt in types
+]
+
+WeaknessType = Literal[
+    "tense_past_simple",
+    "tense_present_perfect",
+    "subject_verb_agreement",
+    "article_usage",
+    "preposition",
+    "word_order",
+    "conditional",
+    "wrong_word",
+    "false_friend",
+    "collocation",
+    "final_consonant",
+    "th_sound",
+]
 
 
 class MessageRole(str, Enum):
@@ -18,6 +62,23 @@ class MessageRole(str, Enum):
     TOOL = "tool"
 
 
+class ThinkingPattern(BaseModel):
+    """
+    Cognitive scaffold helping the learner reason about a grammar/vocab rule.
+
+    Attributes:
+        question: A self-check question the learner can ask themselves.
+        mental_model: Step-by-step decision tree in simple language (Vietnamese OK).
+        example_sentences: 2-3 contrast sentences showing correct vs incorrect usage.
+        common_trap: Specific pitfall for Vietnamese speakers (optional).
+    """
+
+    question: str
+    mental_model: str
+    example_sentences: list[str] = Field(default_factory=list)
+    common_trap: str | None = None
+
+
 class Correction(BaseModel):
     """
     Represents a targeted correction identified by the AI tutor.
@@ -25,14 +86,16 @@ class Correction(BaseModel):
     Attributes:
         original: The learner's original utterance or fragment with errors.
         suggestion: Natural native-like alternative or corrected form.
-        type: Category of the error (grammar, pronunciation, vocab).
+        type: Detailed weakness category from the 12-type taxonomy.
         explanation: Brief explanation in simple Vietnamese or English.
+        thinking_pattern: Optional cognitive scaffold for Phase 4 sentence builder.
     """
 
     original: str
     suggestion: str
-    type: Literal["grammar", "pronunciation", "vocab"]
+    type: WeaknessType
     explanation: str | None = None
+    thinking_pattern: ThinkingPattern | None = None
 
 
 class BaseMessage(BaseModel):

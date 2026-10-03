@@ -59,12 +59,20 @@ class Settings(BaseSettings):
     llm_provider: str = "ollama"
 
     # ── RAG Configuration ────────────────────────────────────────────────────
-    chunk_size: int = 512
-    chunk_overlap: int = 64
+    chunk_size: int = 100
+    chunk_overlap: int = 20
     retrieval_top_k: int = 5
-    similarity_threshold: float = 0.5
+    retrieval_similarity_threshold: float = 0.5
+    similarity_threshold: float = 0.5  # Backward compatibility alias
     max_context_tokens: int = 3000
     conversation_history_limit: int = 5
+    ollama_num_ctx: int = 8192
+    summarization_top_k_per_doc: int = 3
+    summarization_content_word_threshold: int = 3
+    query_rewriting_enabled: bool = True
+    hard_fallback_enabled: bool = True
+    query_rewriter_timeout_seconds: float = 2.5
+    max_message_length: int = 2000
 
     # ── File Upload ──────────────────────────────────────────────────────────
     max_file_size_mb: int = 20

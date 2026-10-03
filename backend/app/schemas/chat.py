@@ -34,7 +34,8 @@ class ChatRequest(BaseModel):
     """Request body for sending a chat message."""
 
     conversation_id: uuid.UUID
-    message: str = Field(min_length=1, max_length=4000)
+    message: str = Field(min_length=1, max_length=2000)
+    client_message_id: uuid.UUID | None = None
     audio_url: str | None = None
     audio_duration_ms: int | None = None
     stt_confidence: float | None = None
@@ -50,6 +51,8 @@ class SourceChunk(BaseModel):
     content: str
     similarity: float
     metadata: dict
+    preview: str | None = None
+    index_in_prompt: int | None = None
 
 
 class ChatResponse(BaseModel):
@@ -59,6 +62,7 @@ class ChatResponse(BaseModel):
     message_id: uuid.UUID
     response: str
     mode: str
+    status: str = "complete"
     audio_url: str | None = None
     corrections: list[Correction] | None = None
     sources: list[SourceChunk] = []
@@ -70,6 +74,9 @@ class MessageResponse(BaseModel):
     id: uuid.UUID
     role: str
     content: str
+    status: str = "complete"
+    client_message_id: uuid.UUID | None = None
+    parent_message_id: uuid.UUID | None = None
     audio_url: str | None = None
     audio_duration_ms: int | None = None
     stt_confidence: float | None = None

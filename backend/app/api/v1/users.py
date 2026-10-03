@@ -1,10 +1,9 @@
 # name: users.py (API router)
 # description: User profile and learning progress endpoints.
 
-import uuid
 from datetime import date
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession

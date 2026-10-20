@@ -2,17 +2,20 @@
 # description: Chat endpoints — create conversations, send messages with SSE streaming,
 #              and retrieve conversation history.
 
+import asyncio
 import json
 import logging
 import uuid
 from collections.abc import AsyncGenerator
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
+from starlette.background import BackgroundTask
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
+from app.core.config import settings
 from app.core.database import AsyncSessionFactory, get_db
 from app.core.exceptions import LLMException
 from app.models.conversation import ConversationMode
@@ -26,13 +29,12 @@ from app.schemas.chat import (
     SourceChunk,
 )
 from app.services.chat_service import ChatService
-from app.services.extraction_service import ExtractionService
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
 logger = logging.getLogger(__name__)
 
-# Module-level singleton — stateless, safe to reuse across requests
-_extraction_service = ExtractionService()
+# Semaphore enforcing local process concurrency backpressure for interactive chat
+chat_semaphore = asyncio.Semaphore(settings.n_chat)
 
 
 @router.post("/conversations", response_model=ConversationResponse, status_code=status.HTTP_201_CREATED)
@@ -136,52 +138,56 @@ async def _validate_document_access(document_ids: list[uuid.UUID] | None, user_i
 @router.post("/stream")
 async def stream_chat(
     body: ChatRequest,
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
 ):
     """
     Send a message and receive a streaming SSE response with decoupled DB sessions.
 
-    Uses Server-Sent Events (text/event-stream) for real-time token delivery.
-    Does NOT hold database connections during token generation.
+    Protected by chat_semaphore to ensure Ollama concurrency limits are respected.
+    Uses Starlette BackgroundTask and generator finally to prevent semaphore slot leaks.
     """
+    try:
+        await asyncio.wait_for(chat_semaphore.acquire(), timeout=5.0)
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Chat system is at capacity. Please try again shortly.",
+        )
+
+    released = False
+
+    async def release_once() -> None:
+        nonlocal released
+        if not released:
+            released = True
+            chat_semaphore.release()
+
     await _validate_document_access(body.document_ids, current_user.id)
     chat_service = ChatService()
     captured: dict = {}
 
     async def event_generator() -> AsyncGenerator[str, None]:
-        async for event_type, payload in chat_service.stream_message(
-            conversation_id=body.conversation_id,
-            user_id=current_user.id,
-            user_level=current_user.level,
-            content=body.message,
-            client_message_id=body.client_message_id,
-            audio_url=body.audio_url,
-            audio_duration_ms=body.audio_duration_ms,
-            stt_confidence=body.stt_confidence,
-            document_ids=body.document_ids,
-            captured=captured,
-        ):
-            yield f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
-
-        # Generator exhausted normally — schedule extraction only if completed
-        if captured.get("user_message") and captured.get("assistant_text"):
-            background_tasks.add_task(
-                _extraction_service.extract_and_log,
-                user_id=current_user.id,
+        try:
+            async for event_type, payload in chat_service.stream_message(
                 conversation_id=body.conversation_id,
-                user_message=captured["user_message"],
-                assistant_text=captured["assistant_text"],
-                assistant_message_id=captured.get("assistant_message_id"),
-            )
-            logger.debug(
-                "Scheduled extraction background task for user=%s session=%s msg=%s",
-                current_user.id, body.conversation_id, captured.get("assistant_message_id"),
-            )
+                user_id=current_user.id,
+                user_level=current_user.level,
+                content=body.message,
+                client_message_id=body.client_message_id,
+                audio_url=body.audio_url,
+                audio_duration_ms=body.audio_duration_ms,
+                stt_confidence=body.stt_confidence,
+                document_ids=body.document_ids,
+                captured=captured,
+            ):
+                yield f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
+        finally:
+            await release_once()
 
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
+        background=BackgroundTask(release_once),
         headers={
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",    # Disable Nginx proxy buffering
@@ -192,52 +198,53 @@ async def stream_chat(
 @router.post("/message", response_model=ChatResponse)
 async def send_message(
     body: ChatRequest,
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
 ):
     """
     Send a message and receive the full response (non-streaming).
+
+    Protected by chat_semaphore backpressure.
     """
-    await _validate_document_access(body.document_ids, current_user.id)
-    chat_service = ChatService()
     try:
-        assistant_msg, chunks = await chat_service.send_message(
-            conversation_id=body.conversation_id,
-            user_id=current_user.id,
-            user_level=current_user.level,
-            content=body.message,
-            client_message_id=body.client_message_id,
-            audio_url=body.audio_url,
-            audio_duration_ms=body.audio_duration_ms,
-            stt_confidence=body.stt_confidence,
-            document_ids=body.document_ids,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
-    except LLMException as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=exc.to_client_payload())
-
-    # Schedule background extraction
-    if body.message and assistant_msg.content:
-        background_tasks.add_task(
-            _extraction_service.extract_and_log,
-            user_id=current_user.id,
-            conversation_id=body.conversation_id,
-            user_message=body.message,
-            assistant_text=assistant_msg.content,
-            assistant_message_id=assistant_msg.id,
+        await asyncio.wait_for(chat_semaphore.acquire(), timeout=5.0)
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Chat system is at capacity. Please try again shortly.",
         )
 
-    conv = await chat_service.get_conversation(body.conversation_id, current_user.id)
-    mode = conv.mode if conv else ConversationMode.CONVERSATION
+    try:
+        await _validate_document_access(body.document_ids, current_user.id)
+        chat_service = ChatService()
+        try:
+            assistant_msg, chunks = await chat_service.send_message(
+                conversation_id=body.conversation_id,
+                user_id=current_user.id,
+                user_level=current_user.level,
+                content=body.message,
+                client_message_id=body.client_message_id,
+                audio_url=body.audio_url,
+                audio_duration_ms=body.audio_duration_ms,
+                stt_confidence=body.stt_confidence,
+                document_ids=body.document_ids,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+        except LLMException as exc:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=exc.to_client_payload())
 
-    return ChatResponse(
-        conversation_id=body.conversation_id,
-        message_id=assistant_msg.id,
-        response=assistant_msg.content,
-        mode=mode,
-        status=assistant_msg.status,
-        audio_url=assistant_msg.audio_url,
-        corrections=assistant_msg.corrections,
-        sources=[SourceChunk(**c.to_dict()) for c in chunks],
-    )
+        conv = await chat_service.get_conversation(body.conversation_id, current_user.id)
+        mode = conv.mode if conv else ConversationMode.CONVERSATION
+
+        return ChatResponse(
+            conversation_id=body.conversation_id,
+            message_id=assistant_msg.id,
+            response=assistant_msg.content,
+            mode=mode,
+            status=assistant_msg.status,
+            audio_url=assistant_msg.audio_url,
+            corrections=assistant_msg.corrections,
+            sources=[SourceChunk(**c.to_dict()) for c in chunks],
+        )
+    finally:
+        chat_semaphore.release()

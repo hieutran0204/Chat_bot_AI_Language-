@@ -75,6 +75,33 @@ class Conversation(Base):
         default=lambda: datetime.now(UTC),
         nullable=False,
     )
+    last_message_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    insight_generated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    process_attempts: Mapped[int] = mapped_column(
+        default=0,
+        server_default=text("0"),
+        nullable=False,
+    )
+    last_failed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    __table_args__ = (
+        Index(
+            "idx_conv_scanner",
+            "last_message_at",
+            postgresql_where=text(
+                "insight_generated_at IS NULL OR insight_generated_at < last_message_at"
+            ),
+        ),
+    )
 
     # ── Relationships ─────────────────────────────────────────────────────────
     user: Mapped["User"] = relationship("User", back_populates="conversations")  # noqa: F821

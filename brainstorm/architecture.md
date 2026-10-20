@@ -1,387 +1,249 @@
-# 🧠 Brainstorm: RAG Chatbot Học Tiếng Anh
+# 🧠 Brainstorm Master — Language AI Backend
 
-> **Mode**: BRAINSTORM — Không có source code nào được tạo ở bước này.
-> **Ngày**: 2026-09-04
-
----
-
-## 1. Tổng quan mục tiêu
-
-Xây dựng một AI Chatbot phục vụ học tiếng Anh với 3 tính năng chính:
-
-| Tính năng | Mô tả |
-|-----------|-------|
-| 🗣️ Conversation Practice | Chatbot đóng vai partner, luyện hội thoại theo chủ đề |
-| 📚 Grammar & Vocabulary | Giải thích ngữ pháp, từ vựng theo ngữ cảnh của user |
-| 🔍 Document Q&A (RAG) | Hỏi đáp dựa trên tài liệu học (sách, giáo trình, PDF) |
-
-**Đặc điểm kỹ thuật:**
-- Backend: **Python FastAPI**
-- LLM Engine: **Ollama** (local) + **HuggingFace Inference API** (fallback/embedding)
-- Vector Store: **PostgreSQL + pgvector**
-- Frontend: **Flutter Mobile App**
-- Kiến trúc: **RAG (Retrieval-Augmented Generation)**
+> **Mode**: BRAINSTORM  
+> **Cập nhật**: 2026-09-27  
+> **Phiên bản hiện tại**: Sprint 2 hoàn tất — Hệ thống Cá nhân hóa & Đo lường Độ trễ sẵn sàng.
 
 ---
 
-## 2. High-Level Architecture
+## 1. Tầm nhìn & Mục tiêu sản phẩm
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│                        FLUTTER MOBILE APP                        │
-│   [Chat Screen] [Document Upload] [Progress Tracker] [Settings]  │
-└─────────────────────────────┬────────────────────────────────────┘
-                              │ HTTPS / WebSocket
-                              ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                     FASTAPI BACKEND                               │
-│  ┌─────────────┐  ┌─────────────┐  ┌──────────────────────────┐ │
-│  │ /chat       │  │ /documents  │  │ /auth / /users / /progress│ │
-│  │ (RAG chain) │  │ (ingestion) │  │ (user management)        │ │
-│  └──────┬──────┘  └──────┬──────┘  └──────────────────────────┘ │
-│         │                │                                        │
-│  ┌──────▼──────────────────────────────────────────────────────┐ │
-│  │                  RAG PIPELINE ENGINE                         │ │
-│  │  [Query Preprocessing] → [Retrieval] → [Context Building]   │ │
-│  │         → [LLM Generation] → [Post-processing]              │ │
-│  └──────┬─────────────────────────────────┬────────────────────┘ │
-└─────────┼─────────────────────────────────┼──────────────────────┘
-          │                                 │
-          ▼                                 ▼
-┌─────────────────────┐        ┌────────────────────────────┐
-│   LLM LAYER         │        │    VECTOR STORE             │
-│  ┌───────────────┐  │        │  PostgreSQL + pgvector       │
-│  │ Ollama (local)│  │        │  - documents table           │
-│  │ - Llama 3.1   │  │        │  - document_chunks table     │
-│  │ - Mistral     │  │        │  - embeddings (vector)       │
-│  │ - Gemma 2     │  │        │  - users table               │
-│  └───────────────┘  │        │  - conversations table       │
-│  ┌───────────────┐  │        │  - messages table            │
-│  │ HuggingFace   │  │        └────────────────────────────┘
-│  │ (embedding +  │  │
-│  │  fallback LLM)│  │
-│  └───────────────┘  │
-└─────────────────────┘
-```
+**Language AI Backend** là máy chủ phục vụ ứng dụng **Gia sư Tiếng Anh luyện nói bằng Giọng nói (Voice-first AI English Speaking Tutor)** dành cho người học Việt Nam.
+
+**3 bài toán cốt lõi đang giải quyết:**
+
+| Bài toán | Giải pháp hiện tại | Trạng thái |
+| :--- | :--- | :---: |
+| **Low-Latency Conversation** | Redis sliding-window buffer + SSE streaming | ✅ Hoàn tất |
+| **Document RAG / Intent Retrieval** | pgvector + HuggingFace embeddings | ✅ Hoàn tất |
+| **Learner Personalization** | 12-taxonomy weakness extraction + async background task | ✅ Hoàn tất |
 
 ---
 
-## 3. Chi tiết từng Component
-
-### 3.1 FastAPI Backend — Cấu trúc thư mục
+## 2. Kiến trúc Hệ thống (Hexagonal / Ports & Adapters)
 
 ```
-language_ai_backend/
-├── app/
-│   ├── api/
-│   │   ├── v1/
-│   │   │   ├── chat.py          # Chat endpoints (RAG query)
-│   │   │   ├── documents.py     # Upload, list, delete documents
-│   │   │   ├── auth.py          # JWT auth
-│   │   │   ├── users.py         # User profile & progress
-│   │   │   └── health.py        # Health check
-│   ├── core/
-│   │   ├── config.py            # Settings (env vars)
-│   │   ├── security.py          # JWT, password hashing
-│   │   └── database.py          # SQLAlchemy + asyncpg setup
-│   ├── models/
-│   │   ├── user.py
-│   │   ├── document.py
-│   │   ├── conversation.py
-│   │   └── message.py
-│   ├── schemas/                 # Pydantic schemas
-│   ├── rag/
-│   │   ├── pipeline.py          # Main RAG orchestration
-│   │   ├── embedder.py          # Embedding (HuggingFace / Ollama)
-│   │   ├── retriever.py         # pgvector similarity search
-│   │   ├── chunker.py           # Document chunking strategy
-│   │   ├── reranker.py          # Optional: cross-encoder reranking
-│   │   └── llm_client.py        # Ollama + HuggingFace client
-│   ├── services/
-│   │   ├── document_service.py  # Document ingestion service
-│   │   ├── chat_service.py      # Conversation management
-│   │   └── user_service.py      # User & progress logic
-│   └── main.py
-├── alembic/                     # DB migrations
-├── tests/
-├── .env
-├── docker-compose.yml
-└── requirements.txt
+                          ┌───────────────────────────────────────┐
+                          │          FastAPI Routers               │
+                          │    /auth  /chat  /documents  /health   │
+                          └─────────────────┬─────────────────────┘
+                                            │
+                                            ▼
+                          ┌───────────────────────────────────────┐
+                          │          Application Services          │
+                          │  ChatService      ExtractionService    │
+                          │  DocumentService  ProfileLoader        │
+                          └──────┬───────────────┬────────────────┘
+                                 │               │
+          ┌──────────────────────┼───────────────┼─────────────────────────┐
+          ▼                      ▼               ▼                         ▼
+┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
+│  ILLMProvider    │  │  IVectorStore    │  │  ILearnerMemory  │  │  IRagPipeline    │
+│  (OllamaLLM,     │  │  (PgVectorStore) │  │  (Redis Chat +   │  │  (NaiveRAG,      │
+│   HuggingFaceLLM)│  │                  │  │   Redis Profile) │  │   ConversationRAG│
+└──────────────────┘  └──────────────────┘  └──────────────────┘  └──────────────────┘
 ```
 
-### 3.2 RAG Pipeline — 2 luồng chính
-
-#### Luồng 1: Document Ingestion (Nạp tài liệu)
+### Cấu trúc thư mục hiện tại (đã ổn định)
 
 ```
-[PDF/DOCX/TXT Upload]
-        │
-        ▼
-[Document Parser]
-  - PyMuPDF (PDF)
-  - python-docx (DOCX)
-  - Unstructured.io (mixed formats)
-        │
-        ▼
-[Text Chunker]
-  Strategy: RecursiveCharacterTextSplitter
-  - chunk_size: 512 tokens
-  - chunk_overlap: 64 tokens
-  - Giữ nguyên câu, không cắt giữa chừng
-        │
-        ▼
-[Embedding Model]
-  Primary: HuggingFace — sentence-transformers/paraphrase-multilingual-mpnet-base-v2
-  (hỗ trợ cả Tiếng Anh + Tiếng Việt trong metadata)
-  Fallback: Ollama nomic-embed-text
-        │
-        ▼
-[Store vào PostgreSQL/pgvector]
-  - document_chunks (content, embedding vector, metadata)
-```
-
-#### Luồng 2: RAG Query (Chat thực tế)
-
-```
-[User gửi câu hỏi]
-        │
-        ▼
-[Query Preprocessing]
-  - Detect intent: grammar_explain | vocab | conversation | document_qa
-  - Nếu là hội thoại thuần: bypass retrieval, dùng conversation history
-        │
-        ▼ (nếu cần retrieval)
-[Query Embedding]
-  - Embed câu hỏi bằng cùng model với lúc ingestion
-        │
-        ▼
-[Vector Similarity Search — pgvector]
-  SELECT content, metadata, 1 - (embedding <=> query_vec) AS similarity
-  FROM document_chunks
-  ORDER BY similarity DESC
-  LIMIT 5 (top-k)
-        │
-        ▼
-[Context Building]
-  - Ghép top-k chunks thành context string
-  - Thêm conversation history (last 5 turns)
-  - Inject vào System Prompt
-        │
-        ▼
-[LLM Generation — Ollama]
-  - Model mặc định: llama3.1:8b hoặc mistral:7b
-  - Streaming response (Server-Sent Events)
-        │
-        ▼
-[Post-processing]
-  - Lưu message vào DB
-  - Cập nhật progress tracking
-  - Return response cho Flutter
+backend/app/
+├── core/
+│   ├── config.py                    # Pydantic-Settings (từ .env)
+│   ├── database.py                  # SQLAlchemy AsyncEngine + Session
+│   ├── security.py                  # JWT encode/decode, bcrypt
+│   ├── profiler.py                  # Latency profiler (TTFT, retrieval, embedding)
+│   ├── interfaces/                  # Ports (Pure Python ABCs)
+│   │   ├── chunker.py               # IChunker
+│   │   ├── embedder.py              # IEmbedder
+│   │   ├── llm_provider.py          # ILLMProvider
+│   │   ├── memory.py                # IMemoryStore, ILearnerProfileStore
+│   │   ├── pipeline.py              # IRagPipeline
+│   │   ├── vector_store.py          # IVectorStore, RetrievedChunk
+│   │   └── voice.py                 # ISpeechToText, ITextToSpeech (placeholder)
+│   ├── primitives/                  # Domain Value Objects
+│   │   ├── messages.py              # BaseMessage, HumanMessage, AIMessage (+ Correction, WeaknessType)
+│   │   ├── prompts.py               # ChatPromptTemplate
+│   │   └── tools.py                 # BaseTool, ToolCall, ToolResult
+│   └── redis/                       # Self-hosted Redis modules
+│       ├── client.py                # Async connection pool
+│       ├── cache.py                 # RedisCacheManager (TTL cache)
+│       ├── memory.py                # RedisChatMessageHistory (IMemoryStore)
+│       └── profile.py               # RedisLearnerProfileManager (ILearnerProfileStore)
+│
+├── adapters/                        # Driven Adapters (Port implementations)
+│   ├── chunkers/recursive_chunker.py
+│   ├── embedders/huggingface_embedder.py, ollama_embedder.py
+│   ├── llm/ollama_llm.py, huggingface_llm.py
+│   └── vector_stores/pgvector_store.py
+│
+├── pipelines/                       # RAG Pipeline orchestration
+│   ├── base_pipeline.py             # BasePipeline (prompt builder, context formatter)
+│   └── naive_rag/pipeline.py        # NaiveRagPipeline (retrieval → generation)
+│
+├── factory/
+│   └── pipeline_factory.py          # create_pipeline() — DI entry point
+│
+├── services/
+│   ├── chat_service.py              # Orchestrator: chat lifecycle, SSE streaming
+│   ├── extraction_service.py        # Async background: weakness extraction (12 taxonomy)
+│   ├── document_service.py          # Document CRUD (DB + file storage)
+│   ├── ingest_service.py            # Chunk + embed + store vector
+│   └── user_service.py             # User CRUD, level management
+│
+├── api/v1/
+│   ├── chat.py                      # Thin router: JWT auth → ChatService
+│   ├── documents.py                 # Thin router: DocumentService
+│   ├── auth.py                      # JWT login/register
+│   ├── users.py                     # User profile + weakness dashboard
+│   └── health.py                    # GET /health (Redis + failure counters)
+│
+└── models/                          # SQLAlchemy ORM Models
+    ├── user.py
+    ├── conversation.py
+    ├── message.py                   # + corrections JSONB, extraction_status, extraction_error
+    ├── document.py + document_chunk.py
+    ├── user_weakness_log.py         # 12-taxonomy weakness log
+    ├── user_strength_log.py
+    └── session_insight.py
 ```
 
 ---
 
-## 4. Database Schema (PostgreSQL + pgvector)
+## 3. 4 Chế độ Trò chuyện (ConversationMode)
 
-```sql
--- Extension
-CREATE EXTENSION IF NOT EXISTS vector;
+| Mode | Hành vi | RAG? |
+| :--- | :--- | :---: |
+| `conversation` | Bạn luyện nói tự nhiên, câu ngắn, luôn hỏi lại | ❌ |
+| `grammar` | Chuyên gia ngữ pháp, giải thích + ví dụ, so sánh tiếng Việt | ✅ |
+| `vocabulary` | Nghĩa từ, collocation, từ đồng nghĩa, sắc thái | ✅ |
+| `document_qa` | Hỏi đáp tài liệu cá nhân (PDF/DOCX), kèm nguồn trích dẫn | ✅ |
 
--- Users
-CREATE TABLE users (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    email       VARCHAR(255) UNIQUE NOT NULL,
-    username    VARCHAR(100) NOT NULL,
-    hashed_pw   TEXT NOT NULL,
-    level       VARCHAR(20) DEFAULT 'beginner', -- A1/A2/B1/B2/C1/C2
-    created_at  TIMESTAMPTZ DEFAULT now()
-);
+---
 
--- Documents (tài liệu người dùng upload)
-CREATE TABLE documents (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id     UUID REFERENCES users(id) ON DELETE CASCADE,
-    filename    TEXT NOT NULL,
-    file_type   VARCHAR(20),   -- pdf, docx, txt
-    status      VARCHAR(20) DEFAULT 'processing', -- processing | ready | failed
-    created_at  TIMESTAMPTZ DEFAULT now()
-);
+## 4. Hệ thống Cá nhân hóa Học viên
 
--- Document Chunks (chunks đã được embed)
-CREATE TABLE document_chunks (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    document_id UUID REFERENCES documents(id) ON DELETE CASCADE,
-    content     TEXT NOT NULL,
-    embedding   vector(768),   -- 768 dims cho mpnet-base
-    chunk_index INTEGER,
-    metadata    JSONB          -- page_number, section, etc.
-);
+### 4.1 Bộ phân loại 12 nhóm lỗi (WeaknessType Taxonomy)
 
--- Index cho similarity search
-CREATE INDEX ON document_chunks USING ivfflat (embedding vector_cosine_ops)
-    WITH (lists = 100);
+**Ngữ pháp (7):** `tense_past_simple` · `tense_present_perfect` · `subject_verb_agreement` · `article_usage` · `preposition` · `word_order` · `conditional`
 
--- Conversations
-CREATE TABLE conversations (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id     UUID REFERENCES users(id) ON DELETE CASCADE,
-    mode        VARCHAR(30),   -- conversation | grammar | vocabulary | doc_qa
-    title       TEXT,
-    created_at  TIMESTAMPTZ DEFAULT now()
-);
+**Từ vựng (3):** `wrong_word` · `false_friend` · `collocation`
 
--- Messages
-CREATE TABLE messages (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    conversation_id UUID REFERENCES conversations(id) ON DELETE CASCADE,
-    role            VARCHAR(10),  -- user | assistant
-    content         TEXT NOT NULL,
-    sources         JSONB,        -- retrieved chunks used (for doc_qa)
-    created_at      TIMESTAMPTZ DEFAULT now()
-);
+**Phát âm (2):** `final_consonant` · `th_sound`
 
--- User Progress
-CREATE TABLE user_progress (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id     UUID REFERENCES users(id) ON DELETE CASCADE,
-    date        DATE DEFAULT CURRENT_DATE,
-    messages_sent INTEGER DEFAULT 0,
-    vocab_learned INTEGER DEFAULT 0,
-    study_minutes INTEGER DEFAULT 0
-);
+### 4.2 Luồng xử lý 2 chiều
+
+```
+[ĐỒNG BỘ — User không phải chờ]
+User gửi tin ──► ProfileLoader (top 3 weaknesses từ Redis)
+             ──► Inject vào System Prompt
+             ──► LLM streaming (SSE)
+             ──► Lưu message với extraction_status='pending'
+
+[BẤT ĐỒNG BỘ — Background Task]
+ExtractionService.extract_and_log()
+  ├── Idempotency Guard (status='done' → skip)
+  ├── LLM phân loại 12 taxonomy (temperature=0.0)
+  ├── Ghi user_weakness_log + UPDATE messages.corrections
+  └── Redis cache invalidation (DELETE profile keys)
 ```
 
 ---
 
-## 5. LLM Strategy: Ollama + HuggingFace
-
-### Ollama (Local — Primary LLM)
-
-| Model | Use case | VRAM |
-|-------|----------|------|
-| `llama3.1:8b` | Conversation, Q&A tổng quát | ~6 GB |
-| `mistral:7b` | Grammar explanation | ~5 GB |
-| `gemma2:9b` | Vocab & detailed explanation | ~7 GB |
-| `nomic-embed-text` | Embedding (nếu không dùng HuggingFace) | ~0.3 GB |
-
-### HuggingFace (Embedding — Primary + LLM Fallback)
-
-| Model | Role |
-|-------|------|
-| `sentence-transformers/paraphrase-multilingual-mpnet-base-v2` | Embedding chính (có hỗ trợ Tiếng Việt) |
-| `BAAI/bge-large-en-v1.5` | Embedding tiếng Anh chất lượng cao hơn |
-| HuggingFace Inference API | Fallback nếu Ollama không khả dụng |
-
-### Intent Routing Strategy
+## 5. Database Schema (PostgreSQL + pgvector)
 
 ```
-user_input
-    │
-    ├─ "Explain this grammar..."  → Grammar Mode (RAG + grammar prompt)
-    ├─ "What does X mean..."      → Vocabulary Mode (dict lookup + LLM)
-    ├─ "Let's practice talking..."→ Conversation Mode (no RAG, roleplay)
-    └─ "In chapter 3, what is..." → Document QA Mode (full RAG)
+users (id, email, username, hashed_pw, level A1-C2)
+  │
+  ├── conversations (id, user_id, mode, title)
+  │       └── messages (id, conversation_id, role, content, audio_url,
+  │                     stt_confidence, extraction_status, extraction_error,
+  │                     corrections JSONB, sources JSONB)
+  │
+  ├── user_weakness_log (id, user_id, conversation_id, weakness_type,
+  │                      original, suggestion, explanation, is_repeated)
+  │
+  ├── user_strength_log (id, user_id, conversation_id, example)
+  │
+  ├── session_insights (id, user_id, conversation_id unique,
+  │                     score 0-100, memo, next_goal)
+  │
+  └── documents (id, user_id, filename, file_type, status)
+          └── document_chunks (id, document_id, content, embedding vector(768),
+                               chunk_index, metadata JSONB)
 ```
+
+**Index quan trọng:**
+- `ix_user_weakness_log_user_id_created_at` (composite) — query top điểm yếu siêu tốc
+- `ivfflat` (embedding cosine) — pgvector similarity search
 
 ---
 
-## 6. System Prompts (Thiết kế prompt)
+## 6. Cấu hình LLM & Stack Hạ tầng (100% Self-hosted)
 
-### Conversation Practice Prompt
-```
-You are an English conversation partner for a {level} level Vietnamese learner.
-- Speak naturally but clearly
-- Correct major grammar mistakes gently
-- Keep responses under 3 sentences to encourage dialogue
-- Ask follow-up questions to keep conversation going
-```
-
-### Grammar Explanation Prompt
-```
-You are an English grammar expert.
-Context from study materials: {retrieved_context}
-- Explain in simple terms, provide examples
-- Compare with Vietnamese grammar if helpful
-- Give 2-3 practice exercises
-```
-
-### Document Q&A Prompt
-```
-You are a helpful study assistant. Answer ONLY based on the provided context.
-Context: {retrieved_context}
-If the answer is not in the context, say "I couldn't find this in your materials."
-```
+| Thành phần | Công nghệ | Vai trò |
+| :--- | :--- | :--- |
+| **LLM Primary** | Ollama `llama3.1:8b` | Chat generation, tool calling |
+| **Embedding** | HuggingFace `multilingual-mpnet-base-v2` | Document & query embedding |
+| **LLM Fallback** | HuggingFace Inference API | Khi Ollama không khả dụng |
+| **Vector Store** | PostgreSQL 16 + pgvector | Similarity search (cosine `<=>`) |
+| **Short-term Memory** | Redis 7 (List, LPUSH/LRANGE) | Chat sliding window (24h TTL) |
+| **Long-term Profile** | Redis 7 (Hash) + PostgreSQL | Learner weaknesses & level cache |
 
 ---
 
-## 7. Flutter App — Màn hình chính
+## 7. Đo lường Độ trễ (Latency Profiler)
 
-```
-App Structure:
-├── AuthScreen (Login / Register)
-├── HomeScreen (Dashboard, progress stats)
-├── ChatScreen
-│   ├── ModeSelector (Conversation / Grammar / Vocab / Doc QA)
-│   ├── MessageList (streaming support)
-│   └── InputBar + Attach Document
-├── LibraryScreen (Quản lý tài liệu đã upload)
-├── ProgressScreen (Charts: messages/day, vocab learned)
-└── SettingsScreen (LLM model selection, level)
-```
+Ghi vào `backend/logs/chat_latency.log` qua `app/core/profiler.py`:
 
-**Packages Flutter cần:**
-- `dio` — HTTP client
-- `flutter_chat_ui` — Chat UI component
-- `file_picker` — Document upload
-- `fl_chart` — Progress charts
-- `flutter_secure_storage` — JWT storage
+| Metric | Mục tiêu |
+| :--- | :--- |
+| `db_user_msg_and_history` | < 10ms |
+| `query_embedding` | 15–35ms |
+| `vector_retrieval` | 10–30ms |
+| `profile_load` (Redis hit) | 2–5ms |
+| `prompt_preparation` | < 2ms |
+| `llm_time_to_first_token` | 300–800ms |
 
 ---
 
-## 8. Rủi ro & Edge Cases
+## 8. Chuỗi Migration Alembic (trạng thái hiện tại)
+
+1. `bd98b2e236e5` — Khởi tạo bảng hệ thống ban đầu
+2. `c1a2b3d4e5f6` — Thêm voice fields + corrections vào `messages`
+3. `a1b2c3d4e5f7` — Thêm 3 bảng analytics người học
+4. **`b2c3d4e5f6a7` ← HEAD** — Chuẩn hóa `session_id→conversation_id`, composite index, `extraction_status`, `extraction_error`
+
+---
+
+## 9. Tính năng còn lại & Roadmap tiếp theo
+
+### 🎯 Sprint 3 — Voice Integration (Chưa bắt đầu)
+- [ ] Implement `ISpeechToText` adapter (Whisper local)
+- [ ] Implement `ITextToSpeech` adapter (Piper TTS / Kokoro)
+- [ ] Audio upload endpoint + `audio_url` wiring
+- [ ] STT confidence threshold (`stt_confidence < 0.7` → hỏi lại user)
+
+### 📊 Sprint 4 — Analytics & Quiz Engine
+- [ ] API `GET /api/v1/users/me/analytics` — báo cáo tiến độ học
+- [ ] `QuizGeneratorTool` — sinh 5–10 câu trắc nghiệm từ điểm yếu tích lũy
+- [ ] Alembic: thêm bảng `generated_quizzes`
+- [ ] Spaced Repetition System (SM-2 algorithm) cho từ vựng
+
+### 🛠️ Bổ sung Tools (khi số lượng tool > 5)
+- [ ] `DictionaryTool` (IPA, definition, collocations)
+- [ ] `GrammarAnalyzerTool` (deep-dive single-sentence analysis)
+- [ ] `ToolRegistry` (dynamic loading khi tool count > 5)
+
+---
+
+## 10. Rủi ro & Giải pháp Phòng ngừa
 
 | Rủi ro | Mức độ | Giải pháp |
-|--------|--------|-----------|
-| Ollama chậm trên CPU | 🔴 High | Dùng quantized models (Q4), fallback HuggingFace API |
-| Embedding dimension mismatch | 🟡 Medium | Lock embedding model, migration script khi đổi model |
-| Context window overflow | 🟡 Medium | Giới hạn top-k=5, mỗi chunk max 512 tokens |
-| User upload tài liệu rác | 🟡 Medium | Validate file type, size limit (20MB), async processing |
-| HuggingFace rate limit (free tier) | 🟡 Medium | Cache embeddings trong DB, chỉ embed khi có tài liệu mới |
-| Câu trả lời hallucination | 🔴 High | Strict prompt engineering, hiển thị sources cho doc_qa mode |
-| Bảo mật JWT | 🟡 Medium | Refresh token rotation, short expiry (15 min access token) |
-
----
-
-## 9. Lộ trình phát triển (3 Phase)
-
-### Phase 1 — MVP (2-3 tuần)
-- [ ] FastAPI boilerplate + PostgreSQL + pgvector setup
-- [ ] Document ingestion pipeline (PDF, TXT)
-- [ ] Basic RAG Q&A với Ollama
-- [ ] Flutter chat screen (text only)
-- [ ] JWT Auth
-
-### Phase 2 — Core Features (3-4 tuần)
-- [ ] Intent routing (4 modes)
-- [ ] Conversation history & context management
-- [ ] Document library management
-- [ ] Flutter: Library screen, Progress screen
-- [ ] HuggingFace embedding integration
-- [ ] Streaming response (SSE)
-
-### Phase 3 — Polish & Scale (2-3 tuần)
-- [ ] Reranking (cross-encoder để cải thiện retrieval quality)
-- [ ] User progress analytics
-- [ ] Multi-document support (chat với nhiều tài liệu cùng lúc)
-- [ ] Caching layer (Redis) cho embeddings thường dùng
-- [ ] Docker Compose full stack
-
----
-
-## 10. Open Questions cần xác nhận trước khi code
-
-1. **Server deployment**: Dự án chạy local (development) hay cần deploy lên server (VPS/cloud)?
-2. **Multi-user**: Hỗ trợ nhiều người dùng hay chỉ single-user (bản thân học)?
-3. **Document scope**: Chỉ tài liệu user tự upload hay có sẵn kho tài liệu mặc định (Cambridge, Oxford)?
-4. **Embedding model language**: Tài liệu học chủ yếu là tiếng Anh hay có cả giải thích bằng tiếng Việt?
-5. **GPU availability**: Máy chạy Ollama có GPU không? (ảnh hưởng đến lựa chọn model size)
+| :--- | :---: | :--- |
+| Redis mất kết nối | 🟡 Medium | Graceful fallback về PostgreSQL (đã implement) |
+| Local LLM sinh tool-call JSON sai | 🟡 Medium | Regex fallback parser trong `BaseTool` |
+| Redis profile hash phình to | 🟡 Medium | Giữ top 10 điểm yếu, decay lỗi cũ |
+| Audio field null gây crash pipeline | 🟡 Medium | Guard `audio_url is not None` toàn bộ pipeline |
+| Extraction background task retry storm | 🔴 High | Idempotency Guard (`status='done'` → skip) — đã implement |
+| LLM hallucination trong doc_qa | 🔴 High | Strict prompt: "Answer ONLY from context", hiển thị sources |

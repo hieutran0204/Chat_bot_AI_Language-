@@ -2,6 +2,7 @@
 # description: Centralized application settings loaded from environment variables using Pydantic Settings.
 
 from functools import lru_cache
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -79,9 +80,53 @@ class Settings(BaseSettings):
     upload_dir: str = "./uploads"
     allowed_extensions: str = "pdf,docx,txt"
 
-    # ── Redis ────────────────────────────────────────────────────────────────
+    # ── Redis & Arq Queue ────────────────────────────────────────────────────
     redis_url: str = "redis://localhost:6379/0"
     cache_ttl_seconds: int = 3600
+
+    # ── Arq & Worker Settings ────────────────────────────────────────────────
+    ollama_num_parallel: int = 4
+    arq_max_jobs: int | None = None
+    arq_max_tries: int = 3
+    arq_job_timeout: int = 330          # Must be >= job_budget + extraction + insight + 30
+    job_budget_seconds: int = 180       # 3 minutes chunk loop budget
+    llm_extraction_timeout: int = 60    # Per chunk extraction call
+    llm_insight_timeout: int = 60       # Session insight call
+    extraction_batch_size: int = 20     # Max messages per chunk
+    extraction_context_window: int = 5  # Preceding messages for conversational context
+    conversation_idle_minutes: int = 30 # Idle threshold to trigger extraction
+    retry_backoff_minutes: int = 60     # Flat retry backoff
+    max_process_attempts: int = 5       # Max dead letter attempts
+    min_messages_for_insight: int = 5   # Min user messages to produce a session insight
+
+    @property
+    def effective_arq_max_jobs(self) -> int:
+        """Return configured arq_max_jobs or dynamically compute from ollama_num_parallel."""
+        if self.arq_max_jobs is not None:
+            return self.arq_max_jobs
+        return max(1, self.ollama_num_parallel // 4)
+
+    @property
+    def n_chat(self) -> int:
+        """Available concurrent slots dedicated to interactive chat backpressure."""
+        slots = self.ollama_num_parallel - self.effective_arq_max_jobs
+        assert slots >= 1, "n_chat must be >= 1. Increase ollama_num_parallel."
+        return slots
+
+    @model_validator(mode="after")
+    def validate_arq_timeout_math(self) -> "Settings":
+        """Validate that ARQ_JOB_TIMEOUT allows for budget + one extra chunk + insight + margin."""
+        min_required = (
+            self.job_budget_seconds
+            + self.llm_extraction_timeout
+            + self.llm_insight_timeout
+            + 30
+        )
+        assert self.arq_job_timeout >= min_required, (
+            f"arq_job_timeout ({self.arq_job_timeout}s) must be >= {min_required}s "
+            f"(budget + extraction + insight + 30s margin)"
+        )
+        return self
 
     @property
     def allowed_ext_list(self) -> list[str]:

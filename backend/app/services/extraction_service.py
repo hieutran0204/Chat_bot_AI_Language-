@@ -9,8 +9,10 @@ import json
 import logging
 import uuid
 
+from pydantic import BaseModel
+
 from app.core.database import AsyncSessionFactory
-from app.core.primitives.messages import ALL_WEAKNESS_TYPES, Correction
+from app.core.primitives.messages import ALL_WEAKNESS_TYPES, Correction, WeaknessType
 from app.core.redis.profile import RedisLearnerProfileManager
 from app.factory.pipeline_factory import create_llm
 from app.models.conversation import Message
@@ -72,6 +74,52 @@ Rules:
 """
 
 _TAXONOMY_LIST = ", ".join(ALL_WEAKNESS_TYPES)
+
+
+class BatchCorrectionItem(BaseModel):
+    """A single identified error mapped to an indexed message within the user batch."""
+
+    chunk_index: int
+    type: WeaknessType
+    original: str
+    suggestion: str
+    explanation: str | None = None
+
+
+class ExtractionResult(BaseModel):
+    """Aggregate result of batch error extraction across multiple user messages."""
+
+    errors: list[BatchCorrectionItem] = []
+
+
+_BATCH_EXTRACTION_PROMPT_TEMPLATE = """You are an English error analysis assistant.
+
+Review the following conversation context and analyze the numbered messages from the LEARNER.
+Identify ALL language errors made by the LEARNER.
+
+RECENT CONTEXT:
+{context_text}
+
+LEARNER MESSAGES TO ANALYZE:
+{messages_text}
+
+For each error made by the learner, return a JSON array with this EXACT schema:
+[
+  {{
+    "chunk_index": <0-based integer index of the message [0], [1], ...>,
+    "type": "<EXACTLY one of: {taxonomy_list}>",
+    "original": "<exact erroneous phrase or word from the learner's message>",
+    "suggestion": "<corrected, native-sounding alternative>",
+    "explanation": "<brief explanation in Vietnamese or simple English, max 1 sentence>"
+  }}
+]
+
+Rules:
+- Use ONLY the taxonomy type codes listed above. Never invent new types.
+- 'chunk_index' MUST match the index number of the message being analyzed (0, 1, ...).
+- If the learner made no errors across all messages, output an empty array: []
+- Output ONLY valid JSON. No prose, no markdown, no code fences.
+"""
 
 
 class ExtractionService:
@@ -277,3 +325,67 @@ class ExtractionService:
             logger.warning(
                 "ExtractionService: Redis cache eviction failed for user=%s.", user_id
             )
+
+    async def invalidate_user_cache(self, user_id: uuid.UUID) -> None:
+        """Public method to evict user profile cache after batch writes."""
+        await self._invalidate_redis_cache(user_id)
+
+    async def extract_batch(
+        self,
+        context: list[Message],
+        user_messages: list[Message],
+    ) -> ExtractionResult:
+        """
+        Call LLM to extract language errors from a batch of user messages.
+
+        Args:
+            context: List of previous messages in the conversation for context.
+            user_messages: List of user messages to analyze in this chunk.
+
+        Returns:
+            ExtractionResult containing list of BatchCorrectionItem with chunk_index.
+        """
+        if not user_messages:
+            return ExtractionResult(errors=[])
+
+        context_lines = [f"{m.role.upper()}: {m.content}" for m in context]
+        context_text = "\n".join(context_lines) if context_lines else "(No previous context)"
+
+        messages_text = "\n".join(
+            f"[{idx}] {m.content}" for idx, m in enumerate(user_messages)
+        )
+
+        prompt = _BATCH_EXTRACTION_PROMPT_TEMPLATE.format(
+            context_text=context_text,
+            messages_text=messages_text,
+            taxonomy_list=_TAXONOMY_LIST,
+        )
+
+        llm = create_llm()
+        raw_output = await llm.chat(
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+            max_tokens=1024,
+        )
+
+        cleaned = raw_output.strip()
+        if cleaned.startswith("```"):
+            cleaned = "\n".join(cleaned.split("\n")[1:-1]).strip()
+
+        data = json.loads(cleaned)
+        if not isinstance(data, list):
+            raise ValueError(
+                f"Expected JSON array from LLM batch extraction, got {type(data).__name__}"
+            )
+
+        errors: list[BatchCorrectionItem] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            idx = item.get("chunk_index")
+            if idx is None or not (0 <= idx < len(user_messages)):
+                continue
+            errors.append(BatchCorrectionItem.model_validate(item))
+
+        return ExtractionResult(errors=errors)
+

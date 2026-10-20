@@ -8,7 +8,7 @@ import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, text
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -56,6 +56,12 @@ class UserWeaknessLog(Base):
         UUID(as_uuid=True),
         ForeignKey("conversations.id", ondelete="CASCADE"),
         nullable=False,
+        index=True,
+    )
+    message_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("messages.id", ondelete="CASCADE"),
+        nullable=True,
         index=True,
     )
     weakness_type: Mapped[str] = mapped_column(String(60), nullable=False, index=True)
@@ -166,7 +172,15 @@ class SessionInsight(Base):
         UUID(as_uuid=True),
         ForeignKey("conversations.id", ondelete="CASCADE"),
         nullable=False,
-        unique=True,
+        index=True,
+    )
+    session_start_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    session_end_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
     )
     encouragements: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
     reminders: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
@@ -179,7 +193,66 @@ class SessionInsight(Base):
         nullable=False,
     )
 
+    __table_args__ = (
+        Index(
+            "uq_session_insight_conv_start",
+            "conversation_id",
+            "session_start_at",
+            unique=True,
+        ),
+    )
+
     def __repr__(self) -> str:
         return (
             f"<SessionInsight conversation={self.conversation_id} score={self.session_score}>"
         )
+
+
+class ExtractionDeadLetter(Base):
+    """
+    Persistent record of unrecoverable extraction or insight generation errors.
+
+    Attributes:
+        id: UUID primary key.
+        conversation_id: Identifier of the failed conversation.
+        message_ids: Array of message UUIDs that failed extraction.
+        error_type: Classification string (e.g. permanent_extraction, permanent_insight).
+        error_message: Error description or stack trace.
+        created_at: UTC creation timestamp.
+    """
+
+    __tablename__ = "extraction_dead_letters"
+    __table_args__ = (
+        Index("idx_dead_letters_conv", "conversation_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=False,
+        index=True,
+    )
+    message_ids: Mapped[list[uuid.UUID]] = mapped_column(
+        ARRAY(UUID(as_uuid=True)),
+        default=list,
+        server_default=text("'{}'"),
+        nullable=False,
+    )
+    error_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        nullable=False,
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<ExtractionDeadLetter id={self.id} conv={self.conversation_id} "
+            f"type={self.error_type}>"
+        )
+

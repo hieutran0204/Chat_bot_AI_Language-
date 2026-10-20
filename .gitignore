@@ -97,3 +97,7 @@ desktop.ini
 # Agent metadata
 .agents/
 .gemini/
+
+# Documentation & Internal Notes
+docs/
+explain/

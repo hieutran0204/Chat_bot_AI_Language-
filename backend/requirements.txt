@@ -39,8 +39,9 @@ python-dotenv==1.0.1
 pydantic-settings==2.5.2
 aiofiles==24.1.0
 
-# --- Caching (optional Phase 3) ---
+# --- Caching & Background Queue ---
 redis==5.1.0
+arq==0.26.1
 
 # --- Testing ---
 pytest==8.3.3

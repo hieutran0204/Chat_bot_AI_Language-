@@ -2,6 +2,7 @@
 # description: Async SQLAlchemy engine and session factory setup for PostgreSQL with pgvector.
 
 from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -37,7 +38,7 @@ class Base(DeclarativeBase):
     pass
 
 
-# ── Dependency ────────────────────────────────────────────────────────────────
+# ── Dependency & Helpers ──────────────────────────────────────────────────────
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """
     FastAPI dependency that yields an async database session.
@@ -57,3 +58,24 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             raise
         finally:
             await session.close()
+
+
+@asynccontextmanager
+async def get_short_session() -> AsyncGenerator[AsyncSession, None]:
+    """
+    Context manager providing an independent short-lived AsyncSession.
+
+    Auto-commits upon successful block exit and rolls back on exception.
+    Used by background workers, schedulers, and queue tasks outside of FastAPI requests.
+
+    Yields:
+        AsyncSession: SQLAlchemy async session.
+    """
+    async with AsyncSessionFactory() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+

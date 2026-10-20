@@ -305,6 +305,7 @@ class ChatService:
         persisted = False
         try:
             async with self._session_factory() as session:
+                now_utc = datetime.now(UTC)
                 stmt = (
                     update(Message)
                     .where(Message.id == placeholder_id)
@@ -312,11 +313,16 @@ class ChatService:
                         content=full_text,
                         status=final_status,
                         is_fallback=is_fallback,
-                        updated_at=datetime.now(UTC),
+                        updated_at=now_utc,
                         sources=[c.to_storage_dict() for c in chunks] if (chunks and not is_fallback) else None,
                     )
                 )
                 await session.execute(stmt)
+                await session.execute(
+                    update(Conversation)
+                    .where(Conversation.id == conversation_id)
+                    .values(last_message_at=now_utc)
+                )
                 await session.commit()
                 persisted = True
                 logger.info(
@@ -903,6 +909,12 @@ class ChatService:
                 sources=[c.to_storage_dict() for c in chunks] if chunks else None,
             )
             session.add(assistant_msg)
+            await session.flush()
+            await session.execute(
+                update(Conversation)
+                .where(Conversation.id == conversation_id)
+                .values(last_message_at=assistant_msg.created_at)
+            )
             await self.update_progress(session, user_id, conv_mode)
             await session.commit()
             await session.refresh(assistant_msg)
